@@ -15,6 +15,8 @@
         button { cursor:pointer; background:#238636; color:#fff; border:none; }
         button:hover { background:#2ea043; }
         button.sec { background:#21262d; border:1px solid #30363d; color:#c9d1d9; }
+        button.danger { background:#da3633; color:#fff; }
+        button.danger:hover { background:#f85149; }
         .card { background:#161b22; border:1px solid #30363d; border-radius:8px;
                 padding:16px; margin-top:16px; }
         table { border-collapse: collapse; width:100%; margin-top:10px; font-size:13px; }
@@ -36,12 +38,28 @@
                         overflow:hidden; margin-top:6px; }
         .progress-fill { height:100%; background:linear-gradient(90deg,#238636,#3fb950);
                          transition: width .5s; }
+        .sse-dot { display:inline-block; width:8px; height:8px; border-radius:50%;
+                   background:#3fb950; margin-right:6px; vertical-align:middle; }
+        .sse-dot.off { background:#f85149; }
     </style>
 </head>
 <body>
 <h1>🔐 MD5 Distributed Bruteforce</h1>
 
 <div class="card">
+    <div class="row" style="margin-bottom:8px">
+        <label>Пресет:</label>
+        <select id="preset" onchange="applyPreset()" style="flex:1;max-width:400px">
+            <option value="">— выбрать готовый —</option>
+            <option value="81dc9bdb52d04dc20036dbd8313ed055|4">1234 (MD5, 4 знака)</option>
+            <option value="e10adc3949ba59abbe56e057f20f883e|6">123456 (MD5, 6 знаков)</option>
+            <option value="25d55ad283aa400af464c76d713c07ad|8">12345678 (MD5, 8 знаков)</option>
+            <option value="5f4dcc3b5aa765d61d8327deb882cf99|8">password (MD5, 8 знаков, не найдётся)</option>
+            <option value="c33367701511b4f6020ec61ded352059|4">qwerty (MD5, 6 знаков, не найдётся)</option>
+        </select>
+        <span id="sseStatus" class="muted"><span class="sse-dot" id="sseDot"></span><span id="sseText">SSE: подключение...</span></span>
+    </div>
+
     <div class="row">
         <label>Хэш:</label>
         <input id="hash" size="40" value="81dc9bdb52d04dc20036dbd8313ed055"/>
@@ -51,12 +69,14 @@
             <option value="6">6 знаков (000000–999999)</option>
             <option value="8">8 знаков (00000000–99999999)</option>
         </select>
-        <button onclick="setTask()">🚀 Задать хэш</button>
-        <span id="msg" class="muted"></span>
     </div>
-    <div class="muted" style="margin-top:8px">
-        Для 4 знаков: <code>1234</code> = 81dc9bdb52d04dc20036dbd8313ed055 ·
-        Для 6 знаков: <code>123456</code> = e10adc3949ba59abbe56e057f20f883e
+
+    <div class="row" style="margin-top:10px">
+        <button onclick="setTask()">🚀 Задать хэш</button>
+        <button class="danger" onclick="stopTask()">⏸ Остановить</button>
+        <button class="sec" onclick="resetTask()">🔄 Сброс</button>
+        <button class="sec" onclick="clearLocal()">🗑 Очистить сохранённое</button>
+        <span id="msg" class="muted"></span>
     </div>
 </div>
 
@@ -76,7 +96,7 @@
     <h2 style="margin-top:0">💻 Воркеры</h2>
     <table>
         <thead><tr>
-            <th>ID</th><th>Диапазон</th><th>Проверено</th><th>Статус</th><th>Heartbeat</th>
+            <th>ID</th><th>Диапазон</th><th>Проверено</th><th>Статус</th>
         </tr></thead>
         <tbody id="workers"></tbody>
     </table>
@@ -88,31 +108,87 @@
 </div>
 
 <script>
+    // ============ LOCALSTORAGE — автосохранение ============
+    function saveLocal() {
+      const hash = document.getElementById('hash').value.trim();
+      const pinLength = document.getElementById('pinLength').value;
+      localStorage.setItem('md5_hash', hash);
+      localStorage.setItem('md5_pinLength', pinLength);
+    }
+
+    function loadLocal() {
+      const hash = localStorage.getItem('md5_hash');
+      const pinLength = localStorage.getItem('md5_pinLength');
+      if (hash) document.getElementById('hash').value = hash;
+      if (pinLength) document.getElementById('pinLength').value = pinLength;
+    }
+
+    function clearLocal() {
+      localStorage.removeItem('md5_hash');
+      localStorage.removeItem('md5_pinLength');
+      document.getElementById('msg').textContent = ' Сохранённое очищено';
+    }
+
+    // Подписываемся на изменения полей — автосохранение
+    document.getElementById('hash').addEventListener('input', saveLocal);
+    document.getElementById('pinLength').addEventListener('change', saveLocal);
+
+    // ============ ПРЕСЕТЫ ============
+    function applyPreset() {
+      const val = document.getElementById('preset').value;
+      if (!val) return;
+      const [hash, pinLength] = val.split('|');
+      document.getElementById('hash').value = hash;
+      document.getElementById('pinLength').value = pinLength;
+      saveLocal();
+      document.getElementById('msg').textContent = ' Пресет выбран — нажми «Задать хэш»';
+    }
+
     // ============ SSE ============
     let evtSource = null;
-    let lastSpeedSamples = [];
 
     function connectSSE() {
       if (evtSource) evtSource.close();
       evtSource = new EventSource('/api/stream');
+
       evtSource.addEventListener('hello', () => {
-        document.getElementById('msg').textContent = 'SSE подключён ✓';
+        setSseStatus(true);
       });
+
       evtSource.addEventListener('update', (e) => {
         const data = JSON.parse(e.data);
         renderSummary(data);
       });
+
       evtSource.addEventListener('found', (e) => {
         const data = JSON.parse(e.data);
         console.log('FOUND:', data);
       });
-      evtSource.addEventListener('worker-dead', (e) => {
-        console.log('Worker dead:', e.data);
+
+      evtSource.addEventListener('reset', () => {
+        document.getElementById('msg').textContent = ' Сервер сброшен';
       });
+
+      evtSource.addEventListener('stopped', () => {
+        document.getElementById('msg').textContent = ' Остановлено пользователем';
+      });
+
       evtSource.onerror = () => {
-        document.getElementById('msg').textContent = 'SSE переподключение...';
+        setSseStatus(false);
         setTimeout(connectSSE, 2000);
       };
+    }
+
+    function setSseStatus(online) {
+      const dot = document.getElementById('sseDot');
+      const text = document.getElementById('sseText');
+      if (online) {
+        dot.classList.remove('off');
+        text.textContent = 'SSE: онлайн';
+      } else {
+        dot.classList.add('off');
+        text.textContent = 'SSE: переподключение...';
+      }
     }
 
     // ============ API ============
@@ -127,6 +203,17 @@
       document.getElementById('msg').textContent = r.ok
           ? ` OK — PIN: ${pinLength} знаков`
           : ' ошибка';
+      saveLocal();
+    }
+
+    async function stopTask() {
+      const r = await fetch('/api/stop', { method: 'POST' });
+      document.getElementById('msg').textContent = r.ok ? ' Остановлено' : ' ошибка';
+    }
+
+    async function resetTask() {
+      const r = await fetch('/api/reset', { method: 'POST' });
+      document.getElementById('msg').textContent = r.ok ? ' Сброшено' : ' ошибка';
     }
 
     async function loadHistory() {
@@ -148,38 +235,38 @@
       const totalChecked = (s.workers || []).reduce((a, w) => a + (w.checked || 0), 0);
       const pct = Math.min(100, (totalChecked / rangeMax) * 100);
 
-      document.getElementById('status').innerHTML =
-        `Хэш: <b>${s.targetHash || '—'}</b> | ` +
-        `PIN: <b>${pinLen} знаков</b> | ` +
-        (s.foundPin
-          ? `<span class="ok">✅ НАЙДЕНО: ${s.foundPin}</span>`
-          : `<span>⏳ идёт подбор…</span>`) +
-        (s.stop ? ' | <span class="stop">STOP разослан</span>' : '') +
-        `<div class="muted" style="margin-top:6px">
+      let statusHtml = `Хэш: <b>${s.targetHash || '—'}</b> | ` +
+          `PIN: <b>${pinLen} знаков</b> | `;
+
+      if (s.foundPin === '__STOPPED__') {
+        statusHtml += `<span class="stop">⏸ Остановлено пользователем</span>`;
+      } else if (s.foundPin) {
+        statusHtml += `<span class="ok">✅ НАЙДЕНО: ${s.foundPin}</span>`;
+      } else {
+        statusHtml += `<span>⏳ идёт подбор…</span>`;
+      }
+
+      statusHtml += `<div class="muted" style="margin-top:6px">
            Проверено: ${totalChecked.toLocaleString()} / ${rangeMax.toLocaleString()}
            (${pct.toFixed(2)}%)
          </div>`;
+
+      document.getElementById('status').innerHTML = statusHtml;
       document.getElementById('progressFill').style.width = pct + '%';
 
-      // Таблица воркеров
       document.getElementById('workers').innerHTML = (s.workers || []).map(w => {
         const start = String(w.start).padStart(pinLen, '0');
         const end = String(w.end).padStart(pinLen, '0');
         const checked = (w.checked || 0).toLocaleString();
         const status = w.status || 'RUNNING';
-        const hb = w.lastHeartbeat
-            ? new Date(w.lastHeartbeat).toLocaleTimeString()
-            : '—';
         return `<tr>
           <td><span class="badge">${w.id}</span></td>
           <td>${start}–${end}</td>
           <td>${checked}</td>
           <td>${status}</td>
-          <td class="muted">${hb}</td>
         </tr>`;
       }).join('');
 
-      // График скорости
       renderSpeedChart(s.speed || []);
     }
 
@@ -188,8 +275,6 @@
       const W = svg.clientWidth || 800, H = 120, P = 20;
       if (!samples.length) { svg.innerHTML = ''; return; }
 
-      // samples: [[timestamp, totalChecked], ...]
-      // Вычисляем скорость: (checked[i] - checked[i-1]) / (t[i] - t[i-1])
       const speeds = [];
       for (let i = 1; i < samples.length; i++) {
         const dt = (samples[i][0] - samples[i-1][0]) / 1000;
@@ -218,11 +303,11 @@
     }
 
     // ============ INIT ============
+    loadLocal();
     connectSSE();
     setInterval(loadHistory, 2000);
     loadHistory();
     window.addEventListener('resize', () => {
-      // Перерисовка графика при изменении размера
       fetch('/api/summary').then(r => r.json()).then(renderSummary);
     });
 </script>

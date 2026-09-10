@@ -454,6 +454,21 @@ public class ServerApplication {
             return Map.of("status", "OK", "hash", hash, "pinLength", pinLength);
         }
 
+        @PostMapping("/stop")
+        public Map<String, Object> stop() {
+            registry.trySetFoundPin("__STOPPED__");
+            broadcaster.broadcast("stopped", Map.of("reason", "user"));
+            return Map.of("status", "STOPPED");
+        }
+
+        @PostMapping("/reset")
+        public Map<String, Object> reset() {
+            registry.reset();
+            initRanges(registry.getPinLength());
+            broadcaster.broadcast("reset", Map.of("pinLength", registry.getPinLength()));
+            return Map.of("status", "OK");
+        }
+
         @PostMapping("/register")
         public Map<String, Object> register(@RequestBody Map<String, String> body) {
             String id = body.get("workerId");
