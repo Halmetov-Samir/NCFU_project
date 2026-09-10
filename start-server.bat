@@ -16,8 +16,9 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist "md5-bruteforce-1.0.0.jar" (
-    echo ОШИБКА: md5-bruteforce-1.0.0.jar не найден в этой папке!
+if not exist "target\md5-bruteforce-1.0.0.jar" (
+    echo ОШИБКА: target\md5-bruteforce-1.0.0.jar не найден!
+    echo Сначала собери проект: mvn clean package -DskipTests
     pause
     exit /b 1
 )
@@ -32,10 +33,6 @@ echo НЕ ЗАКРЫВАЙ это окно! Ctrl+C для остановки.
 echo ============================================
 echo.
 
-java -jar md5-bruteforce-1.0.0.jar server
+java -jar target\md5-bruteforce-1.0.0.jar server
 
-echo.
-echo ============================================
-echo   Сервер остановлен.
-echo ============================================
 pause

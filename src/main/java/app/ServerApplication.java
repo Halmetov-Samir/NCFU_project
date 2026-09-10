@@ -4,7 +4,6 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
@@ -50,9 +49,9 @@ public class ServerApplication {
         }
     }
 
-    /** RATE LIMITING — token bucket на 100 запросов/сек на IP. */
+    /** RATE LIMITING — token bucket на 200 запросов/сек на IP. */
     public static class RateLimitFilter implements Filter {
-        private static final int CAPACITY = 100;
+        private static final int CAPACITY = 200;
         private static final long REFILL_PERIOD_MS = 1000;
         private final Map<String, Bucket> buckets = new ConcurrentHashMap<>();
 
@@ -89,23 +88,29 @@ public class ServerApplication {
     // ============ SINGLETON: TaskRegistry ============
     @org.springframework.stereotype.Component
     public static class TaskRegistry {
-        // pinLength: 4, 6 или 8 знаков
+
+        /** Длина PIN: 4, 6 или 8 знаков. */
         private final AtomicInteger pinLength = new AtomicInteger(4);
-        private final AtomicReference<String> targetHash = new AtomicReference<>("");
+
+        /** Целевой хэш — по умолчанию MD5 от "1234". */
+        private final AtomicReference<String> targetHash =
+                new AtomicReference<>("81dc9bdb52d04dc20036dbd8313ed055");
+
         private final AtomicReference<String> foundPin = new AtomicReference<>(null);
         private final AtomicReference<Boolean> stop = new AtomicReference<>(false);
         private final Map<String, Map<String, Object>> workers = new ConcurrentHashMap<>();
         private final Map<String, Long> lastHeartbeat = new ConcurrentHashMap<>();
 
-        // История попыток (последние 500)
+        /** История попыток (последние 500). */
         private final Deque<Map<String, Object>> history = new ConcurrentLinkedDeque<>();
         private static final int HISTORY_MAX = 500;
 
-        // Скорость: {timestamp, totalChecked}
+        /** Сэмплы скорости: {timestamp, totalChecked}. */
         private final Deque<long[]> speedSamples = new ConcurrentLinkedDeque<>();
         private static final int SPEED_MAX = 60;
 
         public int getPinLength() { return pinLength.get(); }
+
         public void setPinLength(int len) {
             if (len != 4 && len != 6 && len != 8)
                 throw new IllegalArgumentException("pinLength must be 4, 6 or 8");
@@ -114,11 +119,12 @@ public class ServerApplication {
         }
 
         public long getRangeMax() {
-            return (long) Math.pow(10, pinLength.get()); // 10^len
+            return (long) Math.pow(10, pinLength.get());
         }
 
         public String getTargetHash() { return targetHash.get(); }
         public void setTargetHash(String h) { targetHash.set(h); }
+
         public String getFoundPin() { return foundPin.get(); }
         public boolean isStop() { return stop.get(); }
 
@@ -139,10 +145,13 @@ public class ServerApplication {
 
         public void assignRange(String id, long start, long end, boolean initial) {
             if (initial) {
-                workers.put(id, new ConcurrentHashMap<>(Map.of(
-                        "id", id, "start", start, "end", end,
-                        "checked", 0L, "status", "RUNNING",
-                        "initialStart", start, "initialEnd", end)));
+                Map<String, Object> w = new ConcurrentHashMap<>();
+                w.put("id", id);
+                w.put("start", start);
+                w.put("end", end);
+                w.put("checked", 0L);
+                w.put("status", "RUNNING");
+                workers.put(id, w);
             } else {
                 var w = workers.get(id);
                 if (w != null) {
@@ -160,11 +169,12 @@ public class ServerApplication {
         }
 
         public void addHistory(String workerId, String pin, String hash) {
-            history.addFirst(Map.of(
-                    "workerId", workerId,
-                    "pin", pin,
-                    "hash", hash,
-                    "time", System.currentTimeMillis()));
+            Map<String, Object> h = new HashMap<>();
+            h.put("workerId", workerId);
+            h.put("pin", pin);
+            h.put("hash", hash);
+            h.put("time", System.currentTimeMillis());
+            history.addFirst(h);
             while (history.size() > HISTORY_MAX) history.pollLast();
         }
 
@@ -182,9 +192,7 @@ public class ServerApplication {
         }
 
         public Collection<Map<String, Object>> getWorkers() { return workers.values(); }
-
         public Set<String> getWorkerIds() { return workers.keySet(); }
-
         public Map<String, Long> getLastHeartbeats() { return lastHeartbeat; }
 
         public void addSpeedSample(long totalChecked) {
@@ -194,7 +202,6 @@ public class ServerApplication {
 
         public List<long[]> getSpeedSamples() { return new ArrayList<>(speedSamples); }
 
-        /** Периодическая проверка мёртвых воркеров (нет heartbeat > 15 сек). */
         public List<String> findDeadWorkers(long timeoutMs) {
             long now = System.currentTimeMillis();
             List<String> dead = new ArrayList<>();
@@ -202,11 +209,6 @@ public class ServerApplication {
                 if (now - e.getValue() > timeoutMs) dead.add(e.getKey());
             }
             return dead;
-        }
-
-        public boolean hasFreeRanges() {
-            // Диапазон считаем свободным, если воркеров меньше, чем частей
-            return workers.size() < 8;
         }
     }
 
@@ -234,7 +236,6 @@ public class ServerApplication {
         private SplitStrategy strategy = new EqualSplitStrategy();
         private List<long[]> ranges;
         private final AtomicInteger next = new AtomicInteger(0);
-        // Для динамического перераспределения: счётчик выданных «вторых» диапазонов
         private final AtomicLong extraCursor = new AtomicLong(0);
 
         public synchronized void init(long total, int parts) {
@@ -251,12 +252,12 @@ public class ServerApplication {
         public List<long[]> getAllRanges() { return ranges; }
 
         /**
-         * Динамическое перераспределение — выдаём следующий свободный чанк
-         * (используется, когда воркер закончил свой диапазон, а работа ещё есть).
-         * Стратегия: нарезаем весь диапазон на 20 частей, отдаём по одной.
+         * Динамическое перераспределение — выдаём следующий свободный чанк.
+         * Делим всё пространство на 20 частей, отдаём по одной.
          */
         public synchronized long[] nextDynamicChunk() {
-            long total = ranges != null && !ranges.isEmpty() ? ranges.get(ranges.size() - 1)[1] + 1 : 0;
+            long total = ranges != null && !ranges.isEmpty()
+                    ? ranges.get(ranges.size() - 1)[1] + 1 : 0;
             if (total == 0) return null;
             int chunks = 20;
             long size = total / chunks;
@@ -275,44 +276,65 @@ public class ServerApplication {
     // ============ OBSERVER ============
     @org.springframework.stereotype.Component
     public static class WorkerNotifier {
-        public interface Observer { void onSolutionFound(String pin); String getId(); }
+        public interface Observer {
+            void onSolutionFound(String pin);
+            String getId();
+        }
         private final List<Observer> observers = new CopyOnWriteArrayList<>();
         public void register(Observer o) { observers.add(o); }
         public void notifyAll(String pin) {
-            for (var o : observers) try { o.onSolutionFound(pin); } catch (Exception ignored) {}
+            for (var o : observers) {
+                try { o.onSolutionFound(pin); } catch (Exception ignored) {}
+            }
         }
     }
 
     // ============ FACTORY METHOD ============
     @org.springframework.stereotype.Component
     public static class WorkerFactory {
-        public interface Worker { String getId(); void stop(String pin); }
+        public interface Worker {
+            String getId();
+            void stop(String pin);
+        }
+
         public static class RemoteWorker implements Worker, WorkerNotifier.Observer {
-            private final String id; private volatile String stopPin;
+            private final String id;
+            private volatile String stopPin;
             public RemoteWorker(String id) { this.id = id; }
             @Override public String getId() { return id; }
             @Override public void stop(String pin) { this.stopPin = pin; }
             @Override public void onSolutionFound(String pin) { stop(pin); }
         }
-        public Worker create(String type, String id) { return new RemoteWorker(id); }
+
+        public Worker create(String type, String id) {
+            return new RemoteWorker(id);
+        }
     }
 
     // ============ COMMAND ============
     public interface Command { void execute(); }
+
     public static class StartCommand implements Command {
-        private final RangeDistributor d; private final long total; private final int parts;
+        private final RangeDistributor d;
+        private final long total;
+        private final int parts;
         public StartCommand(RangeDistributor d, long total, int parts) {
             this.d = d; this.total = total; this.parts = parts;
         }
         @Override public void execute() { d.init(total, parts); }
     }
+
     public static class StopCommand implements Command {
-        private final TaskRegistry r; private final String pin;
+        private final TaskRegistry r;
+        private final String pin;
         public StopCommand(TaskRegistry r, String pin) { this.r = r; this.pin = pin; }
         @Override public void execute() { r.trySetFoundPin(pin); }
     }
+
     public static class CheckRangeCommand implements Command {
-        private final RangeDistributor d; private final long[] range; private boolean result;
+        private final RangeDistributor d;
+        private final long[] range;
+        private boolean result;
         public CheckRangeCommand(RangeDistributor d, long[] r) { this.d = d; this.range = r; }
         @Override public void execute() {
             result = d.getAllRanges() != null && d.getAllRanges().stream()
@@ -321,7 +343,7 @@ public class ServerApplication {
         public boolean getResult() { return result; }
     }
 
-    // ============ SSE + Monitor ============
+    // ============ SSE (Server-Sent Events) ============
     @org.springframework.stereotype.Component
     public static class EventBroadcaster {
         private final List<SseEmitter> emitters = new CopyOnWriteArrayList<>();
@@ -346,14 +368,15 @@ public class ServerApplication {
         }
     }
 
-    /** Периодические задачи: heartbeat-проверка, сэмплы скорости, broadcast. */
+    /** Периодические задачи: сэмплы скорости, broadcast, heartbeat-проверка. */
     @org.springframework.stereotype.Component
     public static class BackgroundTasks {
         private final TaskRegistry registry;
         private final EventBroadcaster broadcaster;
 
         public BackgroundTasks(TaskRegistry r, EventBroadcaster b) {
-            this.registry = r; this.broadcaster = b;
+            this.registry = r;
+            this.broadcaster = b;
             ScheduledExecutorService exec = Executors.newScheduledThreadPool(2);
 
             // Сэмпл скорости + broadcast раз в секунду
@@ -400,9 +423,12 @@ public class ServerApplication {
         public TaskController(TaskRegistry r, RangeDistributor d,
                               WorkerNotifier n, WorkerFactory f,
                               EventBroadcaster b) {
-            this.registry = r; this.distributor = d;
-            this.notifier = n; this.factory = f; this.broadcaster = b;
-            initRanges(4);
+            this.registry = r;
+            this.distributor = d;
+            this.notifier = n;
+            this.factory = f;
+            this.broadcaster = b;
+            initRanges(registry.getPinLength());
         }
 
         private void initRanges(int pinLength) {
@@ -415,7 +441,12 @@ public class ServerApplication {
         public Map<String, Object> setTask(@RequestBody Map<String, String> body) {
             String hash = body.get("hash");
             String lenStr = body.getOrDefault("pinLength", "4");
-            int pinLength = Integer.parseInt(lenStr);
+            int pinLength;
+            try {
+                pinLength = Integer.parseInt(lenStr);
+            } catch (NumberFormatException e) {
+                pinLength = 4;
+            }
             registry.setPinLength(pinLength);
             registry.setTargetHash(hash);
             initRanges(pinLength);
@@ -428,32 +459,44 @@ public class ServerApplication {
             String id = body.get("workerId");
             long[] r = distributor.nextRange();
             if (r == null) {
-                return Map.of("workerId", id, "stop", true,
-                        "targetHash", registry.getTargetHash(),
-                        "pinLength", registry.getPinLength());
+                Map<String, Object> resp = new HashMap<>();
+                resp.put("workerId", id);
+                resp.put("stop", true);
+                resp.put("targetHash", registry.getTargetHash());
+                resp.put("pinLength", registry.getPinLength());
+                return resp;
             }
             registry.assignRange(id, r[0], r[1], true);
             var w = factory.create("remote", id);
             if (w instanceof WorkerNotifier.Observer o) notifier.register(o);
-            return Map.of("workerId", id, "start", r[0], "end", r[1],
-                    "targetHash", registry.getTargetHash(),
-                    "pinLength", registry.getPinLength(),
-                    "stop", false);
+
+            Map<String, Object> resp = new HashMap<>();
+            resp.put("workerId", id);
+            resp.put("start", r[0]);
+            resp.put("end", r[1]);
+            resp.put("targetHash", registry.getTargetHash());
+            resp.put("pinLength", registry.getPinLength());
+            resp.put("stop", false);
+            return resp;
         }
 
         /** Динамическое перераспределение — воркер просит ещё работы. */
         @PostMapping("/next-range")
         public Map<String, Object> nextRange(@RequestBody Map<String, String> body) {
-            String id = body.get("workerId");
             if (registry.isStop() || registry.getFoundPin() != null) {
-                return Map.of("stop", true);
+                return Map.of("stop", true, "reason", "solved");
             }
             long[] r = distributor.nextDynamicChunk();
             if (r == null) {
                 return Map.of("stop", true, "reason", "no more work");
             }
+            String id = body.get("workerId");
             registry.assignRange(id, r[0], r[1], false);
-            return Map.of("start", r[0], "end", r[1], "stop", false);
+            Map<String, Object> resp = new HashMap<>();
+            resp.put("start", r[0]);
+            resp.put("end", r[1]);
+            resp.put("stop", false);
+            return resp;
         }
 
         @PostMapping("/result")
@@ -472,11 +515,12 @@ public class ServerApplication {
 
         @GetMapping("/status")
         public Map<String, Object> status() {
-            return Map.of(
-                    "stop", registry.isStop(),
-                    "foundPin", registry.getFoundPin() == null ? "" : registry.getFoundPin(),
-                    "targetHash", registry.getTargetHash(),
-                    "pinLength", registry.getPinLength());
+            Map<String, Object> m = new HashMap<>();
+            m.put("stop", registry.isStop());
+            m.put("foundPin", registry.getFoundPin() == null ? "" : registry.getFoundPin());
+            m.put("targetHash", registry.getTargetHash());
+            m.put("pinLength", registry.getPinLength());
+            return m;
         }
 
         @PostMapping("/progress")
@@ -507,16 +551,18 @@ public class ServerApplication {
         }
 
         @GetMapping("/history")
-        public List<Map<String, Object>> history(@RequestParam(defaultValue = "50") int limit) {
+        public List<Map<String, Object>> history(
+                @RequestParam(defaultValue = "50") int limit) {
             return registry.getHistory(limit);
         }
 
-        /** SSE —实时-обновления клиента. */
+        /** SSE — real-time-обновления клиента. */
         @GetMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
         public SseEmitter stream() {
             SseEmitter emitter = broadcaster.subscribe();
             try {
-                emitter.send(SseEmitter.event().name("hello").data(Map.of("status", "connected")));
+                emitter.send(SseEmitter.event().name("hello")
+                        .data(Map.of("status", "connected")));
             } catch (IOException ignored) {}
             return emitter;
         }

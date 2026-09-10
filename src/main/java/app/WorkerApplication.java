@@ -78,11 +78,12 @@ public class WorkerApplication {
                 return Map.of("stop", false, "foundPin", "");
             }
         }
-        @SuppressWarnings("unchecked")
         private Map<String, Object> post(String path, Map<String, Object> body) throws Exception {
             var req = HttpRequest.newBuilder(URI.create(base + path))
                     .timeout(Duration.ofSeconds(5))
                     .header("Content-Type", "application/json")
+                    .header("ngrok-skip-browser-warning", "1")
+                    .header("User-Agent", "MD5Worker/1.0")
                     .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)))
                     .build();
             var resp = http.send(req, HttpResponse.BodyHandlers.ofString()).body();
@@ -91,7 +92,11 @@ public class WorkerApplication {
         @SuppressWarnings("unchecked")
         private Map<String, Object> get(String path) throws Exception {
             var req = HttpRequest.newBuilder(URI.create(base + path))
-                    .timeout(Duration.ofSeconds(5)).GET().build();
+                    .timeout(Duration.ofSeconds(5))
+                    .header("ngrok-skip-browser-warning", "1")
+                    .header("User-Agent", "MD5Worker/1.0")
+                    .GET()
+                    .build();
             var resp = http.send(req, HttpResponse.BodyHandlers.ofString()).body();
             return mapper.readValue(resp, Map.class);
         }
