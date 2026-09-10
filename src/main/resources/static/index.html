@@ -2,72 +2,229 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>MD5 Bruteforce — мониторинг</title>
+    <title>MD5 Bruteforce — Dashboard</title>
     <style>
-        body { font-family: monospace; background:#0d1117; color:#c9d1d9; padding:20px; }
-        h1 { color:#58a6ff; }
-        table { border-collapse: collapse; width:100%; margin-top:20px; }
-        th,td { border:1px solid #30363d; padding:8px 12px; text-align:left; }
-        th { background:#161b22; }
-        input,button { padding:8px; font-family:monospace; background:#161b22; color:#c9d1d9;
-                       border:1px solid #30363d; border-radius:4px; }
-        button { cursor:pointer; background:#238636; }
-        .ok { color:#3fb950; } .stop { color:#f85149; }
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, 'Segoe UI', monospace;
+               background:#0d1117; color:#c9d1d9; padding:20px; margin:0; }
+        h1 { color:#58a6ff; margin-bottom:10px; }
+        h2 { color:#58a6ff; font-size:16px; margin-top:24px; }
+        .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+        input, select, button { padding:8px 12px; font-family:inherit;
+          background:#161b22; color:#c9d1d9; border:1px solid #30363d; border-radius:6px; }
+        button { cursor:pointer; background:#238636; color:#fff; border:none; }
+        button:hover { background:#2ea043; }
+        button.sec { background:#21262d; border:1px solid #30363d; color:#c9d1d9; }
+        .card { background:#161b22; border:1px solid #30363d; border-radius:8px;
+                padding:16px; margin-top:16px; }
+        table { border-collapse: collapse; width:100%; margin-top:10px; font-size:13px; }
+        th,td { border-bottom:1px solid #30363d; padding:8px 10px; text-align:left; }
+        th { background:#0d1117; color:#8b949e; font-weight:500; }
+        .ok { color:#3fb950; font-weight:600; }
+        .stop { color:#f85149; font-weight:600; }
+        .muted { color:#8b949e; font-size:12px; }
+        #speedChart { width:100%; height:120px; background:#0d1117;
+                      border:1px solid #30363d; border-radius:6px; margin-top:10px; }
+        #status { font-size:14px; }
+        #historyList { font-family:monospace; font-size:12px; max-height:200px;
+                       overflow-y:auto; background:#0d1117; border:1px solid #30363d;
+                       border-radius:6px; padding:8px; margin-top:8px; }
+        #historyList div { padding:2px 0; border-bottom:1px solid #21262d; }
+        .badge { display:inline-block; padding:2px 8px; border-radius:10px;
+                 background:#21262d; font-size:11px; color:#8b949e; }
+        .progress-bar { height:8px; background:#21262d; border-radius:4px;
+                        overflow:hidden; margin-top:6px; }
+        .progress-fill { height:100%; background:linear-gradient(90deg,#238636,#3fb950);
+                         transition: width .5s; }
     </style>
 </head>
 <body>
-<h1>MD5 Distributed Bruteforce</h1>
+<h1>🔐 MD5 Distributed Bruteforce</h1>
 
-<div>
-    <input id="hash" size="40" value="81dc9bdb52d04dc20036dbd8313ed055"/>
-    <button onclick="setTask()">Задать хэш</button>
-    <span id="msg"></span>
+<div class="card">
+    <div class="row">
+        <label>Хэш:</label>
+        <input id="hash" size="40" value="81dc9bdb52d04dc20036dbd8313ed055"/>
+        <label>Длина PIN:</label>
+        <select id="pinLength">
+            <option value="4" selected>4 знака (0000–9999)</option>
+            <option value="6">6 знаков (000000–999999)</option>
+            <option value="8">8 знаков (00000000–99999999)</option>
+        </select>
+        <button onclick="setTask()">🚀 Задать хэш</button>
+        <span id="msg" class="muted"></span>
+    </div>
+    <div class="muted" style="margin-top:8px">
+        Для 4 знаков: <code>1234</code> = 81dc9bdb52d04dc20036dbd8313ed055 ·
+        Для 6 знаков: <code>123456</code> = e10adc3949ba59abbe56e057f20f883e
+    </div>
 </div>
 
-<h2>Статус</h2>
-<div id="status">—</div>
+<div class="card">
+    <h2 style="margin-top:0">📊 Статус</h2>
+    <div id="status">—</div>
+    <div class="progress-bar"><div id="progressFill" class="progress-fill" style="width:0%"></div></div>
+</div>
 
-<h2>Воркеры</h2>
-<table>
-    <thead>
-    <tr><th>ID</th><th>Диапазон</th><th>Проверено</th><th>Статус</th></tr>
-    </thead>
-    <tbody id="workers"></tbody>
-</table>
+<div class="card">
+    <h2 style="margin-top:0">⚡ Скорость перебора (последние 60 сек)</h2>
+    <svg id="speedChart"></svg>
+    <div id="speedInfo" class="muted"></div>
+</div>
+
+<div class="card">
+    <h2 style="margin-top:0">💻 Воркеры</h2>
+    <table>
+        <thead><tr>
+            <th>ID</th><th>Диапазон</th><th>Проверено</th><th>Статус</th><th>Heartbeat</th>
+        </tr></thead>
+        <tbody id="workers"></tbody>
+    </table>
+</div>
+
+<div class="card">
+    <h2 style="margin-top:0">📜 История попыток (последние 50)</h2>
+    <div id="historyList"><div class="muted">Пока пусто...</div></div>
+</div>
 
 <script>
+    // ============ SSE ============
+    let evtSource = null;
+    let lastSpeedSamples = [];
+
+    function connectSSE() {
+      if (evtSource) evtSource.close();
+      evtSource = new EventSource('/api/stream');
+      evtSource.addEventListener('hello', () => {
+        document.getElementById('msg').textContent = 'SSE подключён ✓';
+      });
+      evtSource.addEventListener('update', (e) => {
+        const data = JSON.parse(e.data);
+        renderSummary(data);
+      });
+      evtSource.addEventListener('found', (e) => {
+        const data = JSON.parse(e.data);
+        console.log('FOUND:', data);
+      });
+      evtSource.addEventListener('worker-dead', (e) => {
+        console.log('Worker dead:', e.data);
+      });
+      evtSource.onerror = () => {
+        document.getElementById('msg').textContent = 'SSE переподключение...';
+        setTimeout(connectSSE, 2000);
+      };
+    }
+
+    // ============ API ============
     async function setTask() {
-        const hash = document.getElementById('hash').value.trim();
-        const r = await fetch('/api/task', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ hash })
-        });
-        document.getElementById('msg').textContent = r.ok ? ' OK' : ' ошибка';
+      const hash = document.getElementById('hash').value.trim();
+      const pinLength = document.getElementById('pinLength').value;
+      const r = await fetch('/api/task', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hash, pinLength })
+      });
+      document.getElementById('msg').textContent = r.ok
+          ? ` OK — PIN: ${pinLength} знаков`
+          : ' ошибка';
     }
 
-    async function refresh() {
-        try {
-            const s = await (await fetch('/api/summary')).json();
-            document.getElementById('status').innerHTML =
-                `Хэш: <b>${s.targetHash}</b> | ` +
-                (s.foundPin
-                    ? `<span class="ok">НАЙДЕНО: ${s.foundPin}</span>`
-                    : `<span>идёт подбор…</span>`) +
-                (s.stop ? ' | <span class="stop">STOP разослан</span>' : '');
-
-            document.getElementById('workers').innerHTML = (s.workers || []).map(w =>
-                `<tr>
-                    <td>${w.id}</td>
-                    <td>${String(w.start).padStart(4,'0')}–${String(w.end).padStart(4,'0')}</td>
-                    <td>${w.checked}</td>
-                    <td>${w.status}</td>
-                 </tr>`).join('');
-        } catch (e) { /* сервер недоступен */ }
+    async function loadHistory() {
+      try {
+        const list = await (await fetch('/api/history?limit=50')).json();
+        const el = document.getElementById('historyList');
+        if (!list.length) { el.innerHTML = '<div class="muted">Пока пусто...</div>'; return; }
+        el.innerHTML = list.map(h => {
+          const t = new Date(h.time).toLocaleTimeString();
+          return `<div><span class="badge">${h.workerId}</span> ${t} — PIN <b>${h.pin}</b> → ${h.hash}</div>`;
+        }).join('');
+      } catch(e) {}
     }
 
-    setInterval(refresh, 1000);
-    refresh();
+    // ============ RENDER ============
+    function renderSummary(s) {
+      const pinLen = s.pinLength || 4;
+      const rangeMax = s.rangeMax || Math.pow(10, pinLen);
+      const totalChecked = (s.workers || []).reduce((a, w) => a + (w.checked || 0), 0);
+      const pct = Math.min(100, (totalChecked / rangeMax) * 100);
+
+      document.getElementById('status').innerHTML =
+        `Хэш: <b>${s.targetHash || '—'}</b> | ` +
+        `PIN: <b>${pinLen} знаков</b> | ` +
+        (s.foundPin
+          ? `<span class="ok">✅ НАЙДЕНО: ${s.foundPin}</span>`
+          : `<span>⏳ идёт подбор…</span>`) +
+        (s.stop ? ' | <span class="stop">STOP разослан</span>' : '') +
+        `<div class="muted" style="margin-top:6px">
+           Проверено: ${totalChecked.toLocaleString()} / ${rangeMax.toLocaleString()}
+           (${pct.toFixed(2)}%)
+         </div>`;
+      document.getElementById('progressFill').style.width = pct + '%';
+
+      // Таблица воркеров
+      document.getElementById('workers').innerHTML = (s.workers || []).map(w => {
+        const start = String(w.start).padStart(pinLen, '0');
+        const end = String(w.end).padStart(pinLen, '0');
+        const checked = (w.checked || 0).toLocaleString();
+        const status = w.status || 'RUNNING';
+        const hb = w.lastHeartbeat
+            ? new Date(w.lastHeartbeat).toLocaleTimeString()
+            : '—';
+        return `<tr>
+          <td><span class="badge">${w.id}</span></td>
+          <td>${start}–${end}</td>
+          <td>${checked}</td>
+          <td>${status}</td>
+          <td class="muted">${hb}</td>
+        </tr>`;
+      }).join('');
+
+      // График скорости
+      renderSpeedChart(s.speed || []);
+    }
+
+    function renderSpeedChart(samples) {
+      const svg = document.getElementById('speedChart');
+      const W = svg.clientWidth || 800, H = 120, P = 20;
+      if (!samples.length) { svg.innerHTML = ''; return; }
+
+      // samples: [[timestamp, totalChecked], ...]
+      // Вычисляем скорость: (checked[i] - checked[i-1]) / (t[i] - t[i-1])
+      const speeds = [];
+      for (let i = 1; i < samples.length; i++) {
+        const dt = (samples[i][0] - samples[i-1][0]) / 1000;
+        const dc = samples[i][1] - samples[i-1][1];
+        if (dt > 0) speeds.push(dc / dt);
+      }
+      const maxSpeed = Math.max(1, ...speeds);
+      const avg = speeds.length ? speeds.reduce((a,b)=>a+b,0)/speeds.length : 0;
+      const last = speeds.length ? speeds[speeds.length-1] : 0;
+
+      document.getElementById('speedInfo').textContent =
+          `Текущая: ${last.toFixed(0)} PIN/сек · Средняя: ${avg.toFixed(0)} PIN/сек · Макс: ${maxSpeed.toFixed(0)}`;
+
+      const points = speeds.map((v, i) => {
+        const x = P + (i / Math.max(1, speeds.length - 1)) * (W - 2*P);
+        const y = H - P - (v / maxSpeed) * (H - 2*P);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      }).join(' ');
+
+      svg.innerHTML = `
+        <polyline points="${points}" fill="none" stroke="#3fb950" stroke-width="2"/>
+        <line x1="${P}" y1="${H-P}" x2="${W-P}" y2="${H-P}" stroke="#30363d" stroke-width="1"/>
+        <line x1="${P}" y1="${P}" x2="${P}" y2="${H-P}" stroke="#30363d" stroke-width="1"/>
+        <text x="${P+4}" y="${P+12}" fill="#8b949e" font-size="10">${maxSpeed.toFixed(0)} PIN/с</text>
+      `;
+    }
+
+    // ============ INIT ============
+    connectSSE();
+    setInterval(loadHistory, 2000);
+    loadHistory();
+    window.addEventListener('resize', () => {
+      // Перерисовка графика при изменении размера
+      fetch('/api/summary').then(r => r.json()).then(renderSummary);
+    });
 </script>
 </body>
 </html>
