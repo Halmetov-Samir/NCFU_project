@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>MD5 Bruteforce — мониторинг</title>
+    <style>
+        body { font-family: monospace; background:#0d1117; color:#c9d1d9; padding:20px; }
+        h1 { color:#58a6ff; }
+        table { border-collapse: collapse; width:100%; margin-top:20px; }
+        th,td { border:1px solid #30363d; padding:8px 12px; text-align:left; }
+        th { background:#161b22; }
+        input,button { padding:8px; font-family:monospace; background:#161b22; color:#c9d1d9;
+                       border:1px solid #30363d; border-radius:4px; }
+        button { cursor:pointer; background:#238636; }
+        .ok { color:#3fb950; } .stop { color:#f85149; }
+    </style>
+</head>
+<body>
+<h1>MD5 Distributed Bruteforce</h1>
+
+<div>
+    <input id="hash" size="40" value="81dc9bdb52d04dc20036dbd8313ed055"/>
+    <button onclick="setTask()">Задать хэш</button>
+    <span id="msg"></span>
+</div>
+
+<h2>Статус</h2>
+<div id="status">—</div>
+
+<h2>Воркеры</h2>
+<table>
+    <thead>
+    <tr><th>ID</th><th>Диапазон</th><th>Проверено</th><th>Статус</th></tr>
+    </thead>
+    <tbody id="workers"></tbody>
+</table>
+
+<script>
+    async function setTask() {
+        const hash = document.getElementById('hash').value.trim();
+        const r = await fetch('/api/task', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ hash })
+        });
+        document.getElementById('msg').textContent = r.ok ? ' OK' : ' ошибка';
+    }
+
+    async function refresh() {
+        try {
+            const s = await (await fetch('/api/summary')).json();
+            document.getElementById('status').innerHTML =
+                `Хэш: <b>${s.targetHash}</b> | ` +
+                (s.foundPin
+                    ? `<span class="ok">НАЙДЕНО: ${s.foundPin}</span>`
+                    : `<span>идёт подбор…</span>`) +
+                (s.stop ? ' | <span class="stop">STOP разослан</span>' : '');
+
+            document.getElementById('workers').innerHTML = (s.workers || []).map(w =>
+                `<tr>
+                    <td>${w.id}</td>
+                    <td>${String(w.start).padStart(4,'0')}–${String(w.end).padStart(4,'0')}</td>
+                    <td>${w.checked}</td>
+                    <td>${w.status}</td>
+                 </tr>`).join('');
+        } catch (e) { /* сервер недоступен */ }
+    }
+
+    setInterval(refresh, 1000);
+    refresh();
+</script>
+</body>
+</html>
